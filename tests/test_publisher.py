@@ -57,6 +57,14 @@ def test_split_long_text_hard_splits_when_no_paragraphs():
     assert "".join(chunks) == text
 
 
+def test_split_long_text_strips_empty_leading_chunk():
+    text = "\n\n" + "X" * (MAX_TEXT + 100)
+    chunks = split_long_text(text)
+    for c in chunks:
+        assert c, "no chunk should be empty"
+    assert len(chunks) == 2
+
+
 @pytest.fixture
 def bot_mock():
     bot = MagicMock()

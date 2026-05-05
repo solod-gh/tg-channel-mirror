@@ -121,3 +121,27 @@ async def test_fetcher_failure_does_not_advance_state(state: State):
         )
 
     assert await state.get_last_seen_id("durov") == 10
+
+
+async def test_publish_failure_does_not_record_hash(state: State):
+    await state.set_last_seen_id("durov", 10)
+
+    fetched = [make_post(message_id=11, text="some text")]
+    fetcher = AsyncMock(return_value=fetched)
+    publisher = MagicMock()
+    publisher.publish = AsyncMock(side_effect=RuntimeError("publish boom"))
+
+    now = datetime.now(timezone.utc)
+    with pytest.raises(RuntimeError):
+        await process_channel(
+            channel="durov",
+            fetcher=fetcher,
+            publisher=publisher,
+            state=state,
+            dedup_window_hours=24,
+            now=now,
+        )
+
+    from src.main import _hash_text
+    assert await state.was_seen_recently(_hash_text("some text"), 24, now) is False
+    assert await state.get_last_seen_id("durov") == 10

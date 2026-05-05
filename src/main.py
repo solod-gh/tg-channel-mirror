@@ -68,21 +68,23 @@ async def process_channel(
     published = 0
     for post in new_posts:
         text_for_hash = post.text_html or ""
-        if text_for_hash:
-            h = _hash_text(text_for_hash)
-            if await state.was_seen_recently(h, dedup_window_hours, now):
-                logger.info("Dedup skip: %s/%d", channel, post.message_id)
-                await state.set_last_seen_id(channel, post.message_id)
-                continue
-            await state.record_hash(h, channel, now)
+        hash_ = _hash_text(text_for_hash) if text_for_hash else None
+
+        if hash_ and await state.was_seen_recently(hash_, dedup_window_hours, now):
+            logger.info("Dedup skip: %s/%d", channel, post.message_id)
+            await state.set_last_seen_id(channel, post.message_id)
+            continue
 
         try:
             await publisher.publish(post)
-            published += 1
-            await state.set_last_seen_id(channel, post.message_id)
         except Exception:
             logger.exception("Failed to publish %s/%d", channel, post.message_id)
             raise
+
+        if hash_:
+            await state.record_hash(hash_, channel, now)
+        await state.set_last_seen_id(channel, post.message_id)
+        published += 1
 
     return published
 
