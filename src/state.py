@@ -75,20 +75,29 @@ class State:
         await self._conn.commit()
 
     async def was_seen_recently(
-        self, hash_: str, window_hours: int, now: datetime
+        self,
+        hash_: str,
+        window_hours: int,
+        now: datetime,
+        current_channel: str | None = None,
     ) -> bool:
+        """Return True only if hash was first seen in a DIFFERENT channel
+        within the window. Within-channel repeats are not deduped."""
         if window_hours <= 0:
             return False
         assert self._conn is not None
         cutoff = (now.timestamp() - window_hours * 3600)
         async with self._conn.execute(
-            "SELECT first_seen_at FROM seen_hashes WHERE hash = ?",
+            "SELECT first_channel, first_seen_at FROM seen_hashes WHERE hash = ?",
             (hash_,),
         ) as cur:
             row = await cur.fetchone()
             if not row:
                 return False
-            first_seen = datetime.fromisoformat(row[0])
+            first_channel, first_seen_iso = row
+            if current_channel is not None and first_channel == current_channel:
+                return False
+            first_seen = datetime.fromisoformat(first_seen_iso)
             return first_seen.timestamp() >= cutoff
 
     async def cleanup_old_hashes(

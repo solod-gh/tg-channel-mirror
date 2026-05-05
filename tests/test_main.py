@@ -75,6 +75,37 @@ async def test_subsequent_run_publishes_only_new_posts(state: State):
     assert await state.get_last_seen_id("durov") == 12
 
 
+async def test_dedup_does_NOT_skip_within_same_channel(state: State):
+    """Within-channel reposts of the same text are intentional content
+    (e.g. user posts greeting, then greeting+photo) and must not be deduped."""
+    now = datetime.now(timezone.utc)
+    await state.set_last_seen_id("durov", 10)
+
+    from src.main import _hash_text
+    same_text = "Привет"
+    # Simulate that post 11 was just published (its hash recorded for "durov")
+    await state.record_hash(_hash_text(same_text), "durov", now)
+
+    # Post 12 has same text — should NOT be deduped because it's the same channel
+    fetched = [make_post(channel="durov", message_id=12, text=same_text)]
+    fetcher = AsyncMock(return_value=fetched)
+    publisher = MagicMock()
+    publisher.publish = AsyncMock()
+
+    published_count = await process_channel(
+        channel="durov",
+        fetcher=fetcher,
+        publisher=publisher,
+        state=state,
+        dedup_window_hours=24,
+        now=now,
+    )
+
+    assert published_count == 1
+    publisher.publish.assert_awaited_once()
+    assert await state.get_last_seen_id("durov") == 12
+
+
 async def test_dedup_skips_post_with_same_text_from_another_channel(state: State):
     now = datetime.now(timezone.utc)
     await state.set_last_seen_id("durov", 10)

@@ -71,7 +71,7 @@ async def process_channel(
         text_for_hash = post.text_html or ""
         hash_ = _hash_text(text_for_hash) if text_for_hash else None
 
-        if hash_ and await state.was_seen_recently(hash_, dedup_window_hours, now):
+        if hash_ and await state.was_seen_recently(hash_, dedup_window_hours, now, current_channel=channel):
             logger.info("Dedup skip: %s/%d", channel, post.message_id)
             await state.set_last_seen_id(channel, post.message_id)
             continue
