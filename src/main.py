@@ -119,7 +119,6 @@ async def run(config: Config) -> None:
     await state.connect()
 
     bot = Bot(token=config.bot_token)
-    publisher = Publisher(bot=bot, chat_id=config.channel_id)
 
     cleanup = asyncio.create_task(
         cleanup_loop(state, config.dedup_window_hours)
@@ -127,6 +126,7 @@ async def run(config: Config) -> None:
 
     try:
         async with httpx.AsyncClient() as client:
+            publisher = Publisher(bot=bot, chat_id=config.channel_id, http_client=client)
             while True:
                 cycle_start = datetime.now(timezone.utc)
                 for channel in config.channels:

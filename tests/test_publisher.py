@@ -75,8 +75,18 @@ def bot_mock():
     return bot
 
 
-async def test_publish_text_only_post(bot_mock):
-    pub = Publisher(bot=bot_mock, chat_id="-100123")
+@pytest.fixture
+def http_mock():
+    client = MagicMock()
+    response = MagicMock()
+    response.content = b"fake bytes"
+    response.raise_for_status = MagicMock()
+    client.get = AsyncMock(return_value=response)
+    return client
+
+
+async def test_publish_text_only_post(bot_mock, http_mock):
+    pub = Publisher(bot=bot_mock, chat_id="-100123", http_client=http_mock)
     await pub.publish(make_post(text_html="just text"))
 
     bot_mock.send_message.assert_awaited_once()
@@ -86,8 +96,8 @@ async def test_publish_text_only_post(bot_mock):
     assert "@durov" in kwargs["text"]
 
 
-async def test_publish_single_photo_uses_send_photo(bot_mock):
-    pub = Publisher(bot=bot_mock, chat_id="-100123")
+async def test_publish_single_photo_uses_send_photo(bot_mock, http_mock):
+    pub = Publisher(bot=bot_mock, chat_id="-100123", http_client=http_mock)
     await pub.publish(make_post(
         text_html="cap",
         photos=["https://cdn/p.jpg"],
@@ -96,22 +106,32 @@ async def test_publish_single_photo_uses_send_photo(bot_mock):
     bot_mock.send_photo.assert_awaited_once()
     bot_mock.send_message.assert_not_awaited()
     kwargs = bot_mock.send_photo.await_args.kwargs
-    assert kwargs["photo"] == "https://cdn/p.jpg"
+    from aiogram.types import BufferedInputFile
+    assert isinstance(kwargs["photo"], BufferedInputFile)
     assert "cap" in kwargs["caption"]
 
+    # Verify we downloaded the URL
+    http_mock.get.assert_awaited_once_with("https://cdn/p.jpg", timeout=60.0)
 
-async def test_publish_single_video_uses_send_video(bot_mock):
-    pub = Publisher(bot=bot_mock, chat_id="-100123")
+
+async def test_publish_single_video_uses_send_video(bot_mock, http_mock):
+    pub = Publisher(bot=bot_mock, chat_id="-100123", http_client=http_mock)
     await pub.publish(make_post(
         text_html="cap",
         videos=["https://cdn/v.mp4"],
     ))
 
     bot_mock.send_video.assert_awaited_once()
+    kwargs = bot_mock.send_video.await_args.kwargs
+    from aiogram.types import BufferedInputFile
+    assert isinstance(kwargs["video"], BufferedInputFile)
+
+    # Verify we downloaded the URL
+    http_mock.get.assert_awaited_once_with("https://cdn/v.mp4", timeout=60.0)
 
 
-async def test_publish_album_uses_send_media_group(bot_mock):
-    pub = Publisher(bot=bot_mock, chat_id="-100123")
+async def test_publish_album_uses_send_media_group(bot_mock, http_mock):
+    pub = Publisher(bot=bot_mock, chat_id="-100123", http_client=http_mock)
     await pub.publish(make_post(
         text_html="album",
         photos=["https://cdn/p1.jpg", "https://cdn/p2.jpg"],
@@ -122,11 +142,46 @@ async def test_publish_album_uses_send_media_group(bot_mock):
     bot_mock.send_photo.assert_not_awaited()
     media = bot_mock.send_media_group.await_args.kwargs["media"]
     assert len(media) == 2
+    from aiogram.types import BufferedInputFile
+    for item in media:
+        assert isinstance(item.media, BufferedInputFile)
+
+    # Verify we downloaded both URLs
+    assert http_mock.get.await_count == 2
 
 
-async def test_publish_long_text_sends_multiple_messages(bot_mock):
+async def test_publish_long_text_sends_multiple_messages(bot_mock, http_mock):
     long_text = ("X" * 5000)
-    pub = Publisher(bot=bot_mock, chat_id="-100123")
+    pub = Publisher(bot=bot_mock, chat_id="-100123", http_client=http_mock)
     await pub.publish(make_post(text_html=long_text))
 
     assert bot_mock.send_message.await_count >= 2
+
+
+async def test_publish_falls_back_to_text_when_photo_download_fails(bot_mock, http_mock):
+    import httpx as httpx_module
+    http_mock.get = AsyncMock(side_effect=httpx_module.HTTPError("boom"))
+    pub = Publisher(bot=bot_mock, chat_id="-100123", http_client=http_mock)
+
+    await pub.publish(make_post(text_html="cap", photos=["https://cdn/p.jpg"]))
+
+    bot_mock.send_photo.assert_not_awaited()
+    bot_mock.send_message.assert_awaited()
+    kwargs = bot_mock.send_message.await_args.kwargs
+    assert "cap" in kwargs["text"]
+
+
+async def test_publish_skips_oversize_media(bot_mock, http_mock, caplog):
+    import logging
+    big = MagicMock()
+    big.content = b"x" * (50 * 1024 * 1024 + 1)
+    big.raise_for_status = MagicMock()
+    http_mock.get = AsyncMock(return_value=big)
+    pub = Publisher(bot=bot_mock, chat_id="-100123", http_client=http_mock)
+
+    with caplog.at_level(logging.WARNING):
+        await pub.publish(make_post(text_html="cap", photos=["https://cdn/big.jpg"]))
+
+    bot_mock.send_photo.assert_not_awaited()
+    bot_mock.send_message.assert_awaited()  # text-only fallback
+    assert any("oversize" in r.message.lower() for r in caplog.records)
