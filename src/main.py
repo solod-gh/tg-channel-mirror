@@ -1,156 +1,110 @@
 import asyncio
-import hashlib
 import logging
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable
 
-import httpx
-from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest
+from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 
 from src.config import Config, load_config
-from src.parser import Post, parse_posts
-from src.publisher import Publisher
 from src.state import State
 
 
 logger = logging.getLogger("mirror")
-
 DB_PATH = Path("data/state.db")
-HASH_PREFIX_LEN = 200
 
 
-PostFetcher = Callable[[], Awaitable[list[Post]]]
+def _channel_key(chat) -> str:
+    """Stable identifier used as state key. Prefer username for public channels."""
+    username = getattr(chat, "username", None)
+    return username if username else str(chat.id)
 
 
-def _hash_text(text: str) -> str:
-    snippet = text.strip()[:HASH_PREFIX_LEN]
-    return hashlib.sha256(snippet.encode("utf-8")).hexdigest()
+async def _setup_channel(client: TelegramClient, username: str, target, state: State):
+    """Resolve channel, baseline if first run, backfill missed messages otherwise."""
+    ent = await client.get_entity(username)
+    last_seen = await state.get_last_seen_id(username)
 
+    latest_id = 0
+    async for msg in client.iter_messages(ent, limit=1):
+        latest_id = msg.id
+        break
 
-async def fetch_channel_html(client: httpx.AsyncClient, channel: str) -> str:
-    response = await client.get(f"https://t.me/s/{channel}", timeout=30.0)
-    response.raise_for_status()
-    return response.text
+    if last_seen is None:
+        await state.set_last_seen_id(username, latest_id)
+        logger.info("First run for %s: baseline=%d", username, latest_id)
+        return ent
 
+    if latest_id > last_seen:
+        logger.info("Backfilling %s from %d to %d", username, last_seen, latest_id)
+        messages = []
+        async for msg in client.iter_messages(ent, min_id=last_seen):
+            messages.append(msg)
+        for msg in reversed(messages):
+            try:
+                await msg.forward_to(target)
+                await state.set_last_seen_id(username, msg.id)
+                logger.info("Backfilled %s/%d", username, msg.id)
+            except Exception:
+                logger.exception("Backfill forward failed for %s/%d", username, msg.id)
 
-def make_fetcher(client: httpx.AsyncClient, channel: str) -> PostFetcher:
-    async def _fetch() -> list[Post]:
-        html = await fetch_channel_html(client, channel)
-        return parse_posts(html)
-    return _fetch
-
-
-async def process_channel(
-    channel: str,
-    fetcher: PostFetcher,
-    publisher: Publisher,
-    state: State,
-    dedup_window_hours: int,
-    now: datetime,
-) -> int:
-    posts = await fetcher()
-    if not posts:
-        return 0
-
-    last_seen = await state.get_last_seen_id(channel)
-    is_first_run = last_seen is None
-    max_id_in_batch = max(p.message_id for p in posts)
-
-    if is_first_run:
-        await state.set_last_seen_id(channel, max_id_in_batch)
-        logger.info("First run for %s: baseline set to %d", channel, max_id_in_batch)
-        return 0
-
-    new_posts = [p for p in posts if p.message_id > last_seen]
-    new_posts.sort(key=lambda p: p.message_id)
-
-    published = 0
-    for post in new_posts:
-        text_for_hash = post.text_html or ""
-        hash_ = _hash_text(text_for_hash) if text_for_hash else None
-
-        if hash_ and await state.was_seen_recently(hash_, dedup_window_hours, now, current_channel=channel):
-            logger.info("Dedup skip: %s/%d", channel, post.message_id)
-            await state.set_last_seen_id(channel, post.message_id)
-            continue
-
-        try:
-            await publisher.publish(post)
-        except TelegramBadRequest:
-            logger.exception(
-                "Bad post %s/%d (Telegram rejected); skipping permanently",
-                channel, post.message_id,
-            )
-            await state.set_last_seen_id(channel, post.message_id)
-            continue
-        except Exception:
-            logger.exception("Failed to publish %s/%d", channel, post.message_id)
-            raise
-
-        if hash_:
-            await state.record_hash(hash_, channel, now)
-        await state.set_last_seen_id(channel, post.message_id)
-        published += 1
-
-    return published
-
-
-async def cleanup_loop(state: State, window_hours: int, interval_seconds: int = 3600) -> None:
-    while True:
-        await asyncio.sleep(interval_seconds)
-        try:
-            now = datetime.now(timezone.utc)
-            deleted = await state.cleanup_old_hashes(window_hours, now)
-            if deleted:
-                logger.info("Cleanup: removed %d old hashes", deleted)
-        except Exception:
-            logger.exception("Cleanup task failed")
+    return ent
 
 
 async def run(config: Config) -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
-
     state = State(DB_PATH)
     await state.connect()
 
-    bot = Bot(token=config.bot_token)
-
-    cleanup = asyncio.create_task(
-        cleanup_loop(state, config.dedup_window_hours)
+    client = TelegramClient(
+        StringSession(config.session_string),
+        config.api_id,
+        config.api_hash,
     )
 
+    await client.connect()
+    if not await client.is_user_authorized():
+        raise RuntimeError("SESSION_STRING is invalid or revoked; re-run login.py")
+
+    me = await client.get_me()
+    logger.info("Logged in as @%s (id=%s)", me.username or me.first_name, me.id)
+
+    target = await client.get_entity(config.channel_id)
+    logger.info("Target: %s (id=%s)", getattr(target, "title", "?"), config.channel_id)
+
+    entities = []
+    for username in config.channels:
+        try:
+            ent = await _setup_channel(client, username, target, state)
+            entities.append(ent)
+        except Exception:
+            logger.exception("Failed to set up %s; skipping", username)
+
+    if not entities:
+        raise RuntimeError("No source channels could be resolved")
+
+    @client.on(events.NewMessage(chats=entities))
+    async def handler(event):
+        chat = await event.get_chat()
+        key = _channel_key(chat)
+        try:
+            await event.message.forward_to(target)
+            await state.set_last_seen_id(key, event.message.id)
+            logger.info("Forwarded %s/%d", key, event.message.id)
+        except Exception:
+            logger.exception("Forward failed for %s/%d", key, event.message.id)
+
+    logger.info("Listening on %d channels...", len(entities))
     try:
-        async with httpx.AsyncClient() as client:
-            publisher = Publisher(bot=bot, chat_id=config.channel_id, http_client=client)
-            while True:
-                cycle_start = datetime.now(timezone.utc)
-                for channel in config.channels:
-                    try:
-                        await process_channel(
-                            channel=channel,
-                            fetcher=make_fetcher(client, channel),
-                            publisher=publisher,
-                            state=state,
-                            dedup_window_hours=config.dedup_window_hours,
-                            now=datetime.now(timezone.utc),
-                        )
-                    except Exception:
-                        logger.exception("Channel %s failed; continuing", channel)
-                elapsed = (datetime.now(timezone.utc) - cycle_start).total_seconds()
-                sleep_for = max(0.0, config.poll_interval - elapsed)
-                await asyncio.sleep(sleep_for)
+        await client.run_until_disconnected()
     finally:
-        cleanup.cancel()
-        await bot.session.close()
+        await client.disconnect()
         await state.close()
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     config = load_config()
     asyncio.run(run(config))
 

@@ -1,40 +1,42 @@
 import os
 from dataclasses import dataclass
+
 from dotenv import load_dotenv
 
 
 @dataclass(frozen=True)
 class Config:
-    bot_token: str
-    channel_id: str
+    api_id: int
+    api_hash: str
+    session_string: str
+    channel_id: int
     channels: list[str]
-    poll_interval: int
-    dedup_window_hours: int
+
+
+def _required(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(f"{name} env var is required")
+    return value
 
 
 def load_config() -> Config:
     load_dotenv()
 
-    bot_token = os.getenv("BOT_TOKEN", "").strip()
-    if not bot_token:
-        raise RuntimeError("BOT_TOKEN env var is required")
+    api_id = int(_required("API_ID"))
+    api_hash = _required("API_HASH")
+    session_string = _required("SESSION_STRING")
+    channel_id = int(_required("CHANNEL_ID"))
 
-    channel_id = os.getenv("CHANNEL_ID", "").strip()
-    if not channel_id:
-        raise RuntimeError("CHANNEL_ID env var is required")
-
-    channels_raw = os.getenv("CHANNELS", "").strip()
+    channels_raw = _required("CHANNELS")
     channels = [c.strip().lstrip("@") for c in channels_raw.split(",") if c.strip()]
     if not channels:
         raise RuntimeError("CHANNELS env var must list at least one channel")
 
-    poll_interval = int(os.getenv("POLL_INTERVAL", "60"))
-    dedup_window_hours = int(os.getenv("DEDUP_WINDOW", "24"))
-
     return Config(
-        bot_token=bot_token,
+        api_id=api_id,
+        api_hash=api_hash,
+        session_string=session_string,
         channel_id=channel_id,
         channels=channels,
-        poll_interval=poll_interval,
-        dedup_window_hours=dedup_window_hours,
     )
