@@ -42,6 +42,7 @@ def test_load_config_uses_overrides(monkeypatch):
 
 
 def test_load_config_raises_on_missing_required(monkeypatch):
+    monkeypatch.setattr("src.config.load_dotenv", lambda *a, **kw: False)
     monkeypatch.delenv("BOT_TOKEN", raising=False)
     monkeypatch.setenv("CHANNEL_ID", "-1001234567890")
     monkeypatch.setenv("CHANNELS", "durov")
