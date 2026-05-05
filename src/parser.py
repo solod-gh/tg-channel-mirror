@@ -1,6 +1,10 @@
+import re
 from dataclasses import dataclass, field
 
 from selectolax.parser import HTMLParser, Node
+
+
+_BG_URL_RE = re.compile(r"background-image\s*:\s*url\(['\"]?([^'\")]+)['\"]?\)")
 
 
 @dataclass(frozen=True)
@@ -41,11 +45,32 @@ def _parse_one(node: Node) -> Post | None:
     date_link = node.css_first("a.tgme_widget_message_date")
     link = date_link.attributes.get("href", "") if date_link else ""
 
+    photos: list[str] = []
+    for photo_node in node.css("a.tgme_widget_message_photo_wrap"):
+        style = photo_node.attributes.get("style", "")
+        m = _BG_URL_RE.search(style)
+        if m:
+            photos.append(m.group(1))
+
+    videos: list[str] = []
+    for video_node in node.css("video.tgme_widget_message_video"):
+        src = video_node.attributes.get("src", "")
+        if src:
+            videos.append(src)
+
+    grouped_id: str | None = None
+    grouped_wrap = node.css_first("div.tgme_widget_message_grouped_wrap")
+    if grouped_wrap:
+        grouped_id = grouped_wrap.attributes.get("data-grouped-id")
+
     return Post(
         channel=channel,
         message_id=message_id,
         text_html=text_html,
         link=link,
+        photos=photos,
+        videos=videos,
+        grouped_id=grouped_id,
     )
 
 

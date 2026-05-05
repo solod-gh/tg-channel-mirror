@@ -38,3 +38,31 @@ def test_parse_real_telegram_channel_posts_sorted_by_id():
     posts = parse_posts(load("telegram_channel.html"))
     ids = [p.message_id for p in posts]
     assert ids == sorted(ids), "posts should be returned in ascending id order"
+
+
+def test_parse_post_with_photo():
+    posts = parse_posts(load("post_with_photo.html"))
+    assert len(posts) == 1
+    p = posts[0]
+    assert p.photos == ["https://cdn4.cdn-telegram.org/file/photo123.jpg"]
+    assert p.videos == []
+    assert p.text_html == "photo caption"
+
+
+def test_parse_post_with_video():
+    posts = parse_posts(load("post_with_video.html"))
+    assert len(posts) == 1
+    p = posts[0]
+    assert p.videos == ["https://cdn4.cdn-telegram.org/file/video123.mp4"]
+    assert p.photos == []
+
+
+def test_parse_album():
+    posts = parse_posts(load("post_album.html"))
+    assert len(posts) == 1
+    p = posts[0]
+    assert p.grouped_id == "123456789"
+    assert p.photos == [
+        "https://cdn4.cdn-telegram.org/file/p1.jpg",
+        "https://cdn4.cdn-telegram.org/file/p2.jpg",
+    ]
