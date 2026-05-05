@@ -7,7 +7,6 @@ def test_load_config_returns_dataclass(monkeypatch):
     monkeypatch.setenv("CHANNEL_ID", "-1001234567890")
     monkeypatch.setenv("CHANNELS", "durov,telegram")
     monkeypatch.delenv("POLL_INTERVAL", raising=False)
-    monkeypatch.delenv("DEDUP_WINDOW", raising=False)
 
     cfg = load_config()
 
@@ -15,7 +14,6 @@ def test_load_config_returns_dataclass(monkeypatch):
     assert cfg.channel_id == "-1001234567890"
     assert cfg.channels == ["durov", "telegram"]
     assert cfg.poll_interval == 60
-    assert cfg.dedup_window_hours == 24
 
 
 def test_load_config_strips_whitespace_and_at_signs(monkeypatch):
@@ -33,12 +31,10 @@ def test_load_config_uses_overrides(monkeypatch):
     monkeypatch.setenv("CHANNEL_ID", "-1001234567890")
     monkeypatch.setenv("CHANNELS", "durov")
     monkeypatch.setenv("POLL_INTERVAL", "30")
-    monkeypatch.setenv("DEDUP_WINDOW", "0")
 
     cfg = load_config()
 
     assert cfg.poll_interval == 30
-    assert cfg.dedup_window_hours == 0
 
 
 def test_load_config_raises_on_missing_required(monkeypatch):

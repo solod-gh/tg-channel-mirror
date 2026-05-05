@@ -1,4 +1,3 @@
-from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -9,16 +8,8 @@ from src.parser import Post
 from src.state import State
 
 
-def make_post(channel="durov", message_id=1, text="hi") -> Post:
-    return Post(
-        channel=channel,
-        message_id=message_id,
-        text_html=text,
-        link=f"https://t.me/{channel}/{message_id}",
-        photos=[],
-        videos=[],
-        grouped_id=None,
-    )
+def _post(channel="durov", message_id=1) -> Post:
+    return Post(channel=channel, message_id=message_id)
 
 
 @pytest.fixture
@@ -30,151 +21,51 @@ async def state(tmp_path: Path):
 
 
 async def test_first_run_sets_baseline_without_publishing(state: State):
-    fetched = [make_post(message_id=10), make_post(message_id=11), make_post(message_id=12)]
+    fetched = [_post(message_id=10), _post(message_id=11), _post(message_id=12)]
     fetcher = AsyncMock(return_value=fetched)
     publisher = MagicMock()
     publisher.publish = AsyncMock()
 
-    published_count = await process_channel(
-        channel="durov",
-        fetcher=fetcher,
-        publisher=publisher,
-        state=state,
-        dedup_window_hours=24,
-        now=datetime.now(timezone.utc),
+    published = await process_channel(
+        channel="durov", fetcher=fetcher, publisher=publisher, state=state,
     )
 
-    assert published_count == 0
+    assert published == 0
     publisher.publish.assert_not_awaited()
     assert await state.get_last_seen_id("durov") == 12
 
 
 async def test_subsequent_run_publishes_only_new_posts(state: State):
     await state.set_last_seen_id("durov", 10)
-
-    fetched = [make_post(message_id=10, text="old"), make_post(message_id=11, text="new1"), make_post(message_id=12, text="new2")]
+    fetched = [_post(message_id=10), _post(message_id=11), _post(message_id=12)]
     fetcher = AsyncMock(return_value=fetched)
     publisher = MagicMock()
     publisher.publish = AsyncMock()
 
-    published_count = await process_channel(
-        channel="durov",
-        fetcher=fetcher,
-        publisher=publisher,
-        state=state,
-        dedup_window_hours=24,
-        now=datetime.now(timezone.utc),
+    published = await process_channel(
+        channel="durov", fetcher=fetcher, publisher=publisher, state=state,
     )
 
-    assert published_count == 2
+    assert published == 2
     assert publisher.publish.await_count == 2
     published_ids = [
-        call.args[0].message_id for call in publisher.publish.await_args_list
+        c.args[0].message_id for c in publisher.publish.await_args_list
     ]
     assert published_ids == [11, 12]
     assert await state.get_last_seen_id("durov") == 12
 
 
-async def test_dedup_does_NOT_skip_within_same_channel(state: State):
-    """Within-channel reposts of the same text are intentional content
-    (e.g. user posts greeting, then greeting+photo) and must not be deduped."""
-    now = datetime.now(timezone.utc)
-    await state.set_last_seen_id("durov", 10)
-
-    from src.main import _hash_text
-    same_text = "Привет"
-    # Simulate that post 11 was just published (its hash recorded for "durov")
-    await state.record_hash(_hash_text(same_text), "durov", now)
-
-    # Post 12 has same text — should NOT be deduped because it's the same channel
-    fetched = [make_post(channel="durov", message_id=12, text=same_text)]
-    fetcher = AsyncMock(return_value=fetched)
-    publisher = MagicMock()
-    publisher.publish = AsyncMock()
-
-    published_count = await process_channel(
-        channel="durov",
-        fetcher=fetcher,
-        publisher=publisher,
-        state=state,
-        dedup_window_hours=24,
-        now=now,
-    )
-
-    assert published_count == 1
-    publisher.publish.assert_awaited_once()
-    assert await state.get_last_seen_id("durov") == 12
-
-
-async def test_dedup_skips_post_with_same_text_from_another_channel(state: State):
-    now = datetime.now(timezone.utc)
-    await state.set_last_seen_id("durov", 10)
-    await state.set_last_seen_id("other", 100)
-
-    from src.main import _hash_text
-    duplicate_text = "exact same body"
-    await state.record_hash(_hash_text(duplicate_text), "other", now)
-
-    fetched = [make_post(channel="durov", message_id=11, text=duplicate_text)]
-    fetcher = AsyncMock(return_value=fetched)
-    publisher = MagicMock()
-    publisher.publish = AsyncMock()
-
-    published_count = await process_channel(
-        channel="durov",
-        fetcher=fetcher,
-        publisher=publisher,
-        state=state,
-        dedup_window_hours=24,
-        now=now,
-    )
-
-    assert published_count == 0
-    publisher.publish.assert_not_awaited()
-    assert await state.get_last_seen_id("durov") == 11
-
-
 async def test_fetcher_failure_does_not_advance_state(state: State):
     await state.set_last_seen_id("durov", 10)
-
-    fetcher = AsyncMock(side_effect=RuntimeError("network down"))
+    fetcher = AsyncMock(side_effect=RuntimeError("boom"))
     publisher = MagicMock()
     publisher.publish = AsyncMock()
 
     with pytest.raises(RuntimeError):
         await process_channel(
-            channel="durov",
-            fetcher=fetcher,
-            publisher=publisher,
-            state=state,
-            dedup_window_hours=24,
-            now=datetime.now(timezone.utc),
+            channel="durov", fetcher=fetcher, publisher=publisher, state=state,
         )
 
-    assert await state.get_last_seen_id("durov") == 10
-
-
-async def test_publish_failure_does_not_record_hash(state: State):
-    await state.set_last_seen_id("durov", 10)
-
-    fetched = [make_post(message_id=11, text="some text")]
-    fetcher = AsyncMock(return_value=fetched)
-    publisher = MagicMock()
-    publisher.publish = AsyncMock(side_effect=RuntimeError("publish boom"))
-
-    now = datetime.now(timezone.utc)
-    with pytest.raises(RuntimeError):
-        await process_channel(
-            channel="durov",
-            fetcher=fetcher,
-            publisher=publisher,
-            state=state,
-            dedup_window_hours=24,
-            now=now,
-        )
-
-    from src.main import _hash_text
-    assert await state.was_seen_recently(_hash_text("some text"), 24, now) is False
     assert await state.get_last_seen_id("durov") == 10
 
 
@@ -183,11 +74,7 @@ async def test_telegram_bad_request_advances_state_and_continues(state: State):
     from aiogram.methods import SendMessage
 
     await state.set_last_seen_id("durov", 10)
-
-    fetched = [
-        make_post(message_id=11, text="bad"),
-        make_post(message_id=12, text="good"),
-    ]
+    fetched = [_post(message_id=11), _post(message_id=12)]
     fetcher = AsyncMock(return_value=fetched)
     publisher = MagicMock()
     publisher.publish = AsyncMock(side_effect=[
@@ -196,12 +83,7 @@ async def test_telegram_bad_request_advances_state_and_continues(state: State):
     ])
 
     published = await process_channel(
-        channel="durov",
-        fetcher=fetcher,
-        publisher=publisher,
-        state=state,
-        dedup_window_hours=24,
-        now=datetime.now(timezone.utc),
+        channel="durov", fetcher=fetcher, publisher=publisher, state=state,
     )
 
     assert published == 1

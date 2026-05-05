@@ -9,7 +9,6 @@ class Config:
     channel_id: str
     channels: list[str]
     poll_interval: int
-    dedup_window_hours: int
 
 
 def load_config() -> Config:
@@ -29,12 +28,10 @@ def load_config() -> Config:
         raise RuntimeError("CHANNELS env var must list at least one channel")
 
     poll_interval = int(os.getenv("POLL_INTERVAL", "60"))
-    dedup_window_hours = int(os.getenv("DEDUP_WINDOW", "24"))
 
     return Config(
         bot_token=bot_token,
         channel_id=channel_id,
         channels=channels,
         poll_interval=poll_interval,
-        dedup_window_hours=dedup_window_hours,
     )

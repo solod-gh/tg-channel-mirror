@@ -10,14 +10,6 @@ CREATE TABLE IF NOT EXISTS channel_state (
     last_seen_id INTEGER NOT NULL,
     updated_at TEXT NOT NULL
 );
-
-CREATE TABLE IF NOT EXISTS seen_hashes (
-    hash TEXT PRIMARY KEY,
-    first_channel TEXT NOT NULL,
-    first_seen_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_seen_hashes_time ON seen_hashes(first_seen_at);
 """
 
 
@@ -60,55 +52,3 @@ class State:
             (channel, message_id, now),
         )
         await self._conn.commit()
-
-    async def record_hash(
-        self, hash_: str, channel: str, when: datetime
-    ) -> None:
-        assert self._conn is not None
-        await self._conn.execute(
-            """
-            INSERT OR IGNORE INTO seen_hashes (hash, first_channel, first_seen_at)
-            VALUES (?, ?, ?)
-            """,
-            (hash_, channel, when.isoformat()),
-        )
-        await self._conn.commit()
-
-    async def was_seen_recently(
-        self,
-        hash_: str,
-        window_hours: int,
-        now: datetime,
-        current_channel: str | None = None,
-    ) -> bool:
-        """Return True only if hash was first seen in a DIFFERENT channel
-        within the window. Within-channel repeats are not deduped."""
-        if window_hours <= 0:
-            return False
-        assert self._conn is not None
-        cutoff = (now.timestamp() - window_hours * 3600)
-        async with self._conn.execute(
-            "SELECT first_channel, first_seen_at FROM seen_hashes WHERE hash = ?",
-            (hash_,),
-        ) as cur:
-            row = await cur.fetchone()
-            if not row:
-                return False
-            first_channel, first_seen_iso = row
-            if current_channel is not None and first_channel == current_channel:
-                return False
-            first_seen = datetime.fromisoformat(first_seen_iso)
-            return first_seen.timestamp() >= cutoff
-
-    async def cleanup_old_hashes(
-        self, window_hours: int, now: datetime
-    ) -> int:
-        assert self._conn is not None
-        cutoff_ts = now.timestamp() - window_hours * 3600
-        cutoff_iso = datetime.fromtimestamp(cutoff_ts, tz=timezone.utc).isoformat()
-        cur = await self._conn.execute(
-            "DELETE FROM seen_hashes WHERE first_seen_at < ?",
-            (cutoff_iso,),
-        )
-        await self._conn.commit()
-        return cur.rowcount or 0
