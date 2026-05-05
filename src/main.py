@@ -7,6 +7,7 @@ from typing import Awaitable, Callable
 
 import httpx
 from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest
 
 from src.config import Config, load_config
 from src.parser import Post, parse_posts
@@ -77,6 +78,13 @@ async def process_channel(
 
         try:
             await publisher.publish(post)
+        except TelegramBadRequest:
+            logger.exception(
+                "Bad post %s/%d (Telegram rejected); skipping permanently",
+                channel, post.message_id,
+            )
+            await state.set_last_seen_id(channel, post.message_id)
+            continue
         except Exception:
             logger.exception("Failed to publish %s/%d", channel, post.message_id)
             raise

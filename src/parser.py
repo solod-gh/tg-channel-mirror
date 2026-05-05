@@ -1,3 +1,4 @@
+import html
 import re
 from dataclasses import dataclass, field
 
@@ -5,6 +6,11 @@ from selectolax.parser import HTMLParser, Node
 
 
 _BG_URL_RE = re.compile(r"background-image\s*:\s*url\(['\"]?([^'\")]+)['\"]?\)")
+
+_ALLOWED_TAGS = frozenset({
+    "b", "strong", "i", "em", "u", "ins", "s", "strike", "del",
+    "a", "code", "pre", "blockquote", "tg-spoiler",
+})
 
 
 @dataclass(frozen=True)
@@ -38,9 +44,7 @@ def _parse_one(node: Node) -> Post | None:
         return None
 
     text_node = node.css_first("div.tgme_widget_message_text")
-    text_html = text_node.html if text_node else ""
-    if text_html:
-        text_html = _strip_outer_div(text_html)
+    text_html = _sanitize_to_telegram_html(text_node) if text_node else ""
 
     date_link = node.css_first("a.tgme_widget_message_date")
     link = date_link.attributes.get("href", "") if date_link else ""
@@ -53,7 +57,7 @@ def _parse_one(node: Node) -> Post | None:
             photos.append(m.group(1))
 
     videos: list[str] = []
-    for video_node in node.css("video.tgme_widget_message_video"):
+    for video_node in node.css("video.tgme_widget_message_video, video.tgme_widget_message_roundvideo"):
         src = video_node.attributes.get("src", "")
         if src:
             videos.append(src)
@@ -74,10 +78,28 @@ def _parse_one(node: Node) -> Post | None:
     )
 
 
-def _strip_outer_div(html: str) -> str:
-    """selectolax .html includes the outer tag; we want just inner content."""
-    inner_start = html.find(">")
-    inner_end = html.rfind("<")
-    if inner_start == -1 or inner_end == -1 or inner_end <= inner_start:
-        return html
-    return html[inner_start + 1 : inner_end]
+def _sanitize_to_telegram_html(node: Node) -> str:
+    """Walk a selectolax node's children, emit Telegram-compatible HTML.
+    Only the children are walked — the node itself is treated as a wrapper."""
+    parts: list[str] = []
+    for child in node.iter(include_text=True):
+        tag = child.tag
+        if tag == "-text":
+            parts.append(html.escape(child.text(deep=False) or "", quote=False))
+        elif tag == "br":
+            parts.append("\n")
+        elif tag in ("div", "p"):
+            inner = _sanitize_to_telegram_html(child)
+            parts.append(inner)
+            if inner and not inner.endswith("\n"):
+                parts.append("\n")
+        elif tag == "a":
+            inner = _sanitize_to_telegram_html(child)
+            href = html.escape(child.attributes.get("href", "") or "", quote=True)
+            parts.append(f'<a href="{href}">{inner}</a>')
+        elif tag in _ALLOWED_TAGS:
+            inner = _sanitize_to_telegram_html(child)
+            parts.append(f"<{tag}>{inner}</{tag}>")
+        else:
+            parts.append(_sanitize_to_telegram_html(child))
+    return "".join(parts).strip("\n")

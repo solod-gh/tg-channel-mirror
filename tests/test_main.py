@@ -145,3 +145,34 @@ async def test_publish_failure_does_not_record_hash(state: State):
     from src.main import _hash_text
     assert await state.was_seen_recently(_hash_text("some text"), 24, now) is False
     assert await state.get_last_seen_id("durov") == 10
+
+
+async def test_telegram_bad_request_advances_state_and_continues(state: State):
+    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.methods import SendMessage
+
+    await state.set_last_seen_id("durov", 10)
+
+    fetched = [
+        make_post(message_id=11, text="bad"),
+        make_post(message_id=12, text="good"),
+    ]
+    fetcher = AsyncMock(return_value=fetched)
+    publisher = MagicMock()
+    publisher.publish = AsyncMock(side_effect=[
+        TelegramBadRequest(method=SendMessage(chat_id=1, text="x"), message="parse error"),
+        None,
+    ])
+
+    published = await process_channel(
+        channel="durov",
+        fetcher=fetcher,
+        publisher=publisher,
+        state=state,
+        dedup_window_hours=24,
+        now=datetime.now(timezone.utc),
+    )
+
+    assert published == 1
+    assert publisher.publish.await_count == 2
+    assert await state.get_last_seen_id("durov") == 12
