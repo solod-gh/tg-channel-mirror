@@ -1,0 +1,14 @@
+[Unit]
+Description=TG Channel Mirror
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/tg-channel-mirror
+ExecStart=/root/tg-channel-mirror/.venv/bin/python -m src.main
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
